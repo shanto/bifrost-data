@@ -52,18 +52,21 @@
         padding: 0.9rem;
         overflow: auto;
       }
-      dl {
-        display: grid;
-        grid-template-columns: max-content 1fr;
-        gap: 0.35rem 1.25rem;
-        margin: 2rem 0 0;
-      }
-      dt {
-        color: var(--muted);
-      }
-      dd {
-        margin: 0;
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 2rem;
         font-variant-numeric: tabular-nums;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.4rem 0.6rem;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 500;
       }
       hr {
         border: 0;
@@ -74,11 +77,12 @@
   </head>
   <body>
     <h1>bifrost-data</h1>
-    <p class="sub">Pollinations model data infused into the stock Bifrost datasheet.</p>
+    <p class="sub">Third-party model catalogs infused into the stock Bifrost datasheet.</p>
 
     <ul>
-      <li><a href="./datasheet.json">datasheet.json</a> — stock Bifrost datasheet + the pollinations entries</li>
+      <li><a href="./datasheet.json">datasheet.json</a> — stock Bifrost datasheet + every provider's entries</li>
       <li><a href="./pollinations.json">pollinations.json</a> — only the pollinations entries</li>
+      <li><a href="./sail.json">sail.json</a> — only the sail entries</li>
     </ul>
 
     <pre><code>"pollinations/openai/gpt-6.2-astra": {
@@ -97,10 +101,12 @@
       (pollen treated 1:1), and <code>base_model</code> naming the core they extend.
     </p>
 
-    <dl id="stats">
-      <dt>generated</dt>
-      <dd>…</dd>
-    </dl>
+    <table id="stats">
+      <thead>
+        <tr><th>provider</th><th>models</th><th>extend a core</th><th>standalone</th><th>priced</th><th>units</th></tr>
+      </thead>
+      <tbody><tr><td colspan="6">…</td></tr></tbody>
+    </table>
 
     <hr />
     <p class="sub">
@@ -108,27 +114,22 @@
     </p>
 
     <script>
-      fetch("./pollinations.json")
-        .then((r) => r.json())
-        .then((doc) => {
+      const names = ["pollinations", "sail"];
+      Promise.all(
+        names.map((n) =>
+          fetch(`./${n}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null)
+        ),
+      ).then((docs) => {
+        const rows = docs.filter(Boolean).map((doc) => {
           const s = doc.stats;
-          const rows = [
-            ["generated", new Date(doc.generated_at).toISOString().replace("T", " ").slice(0, 19) + " UTC"],
-            ["units", doc.units],
-            ["pollinations models", s.pollinations_entries.toLocaleString()],
-            ["extend a known core", s.matched_cores.toLocaleString()],
-            ["standalone", s.unmatched_cores.toLocaleString()],
-            ["with cost fields", s.with_prices.toLocaleString()],
-            ["size", (JSON.stringify(doc).length / 1024).toFixed(1) + " KiB"],
-          ];
-          document.getElementById("stats").innerHTML = rows
-            .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)
-            .join("");
-        })
-        .catch(() => {
-          document.getElementById("stats").innerHTML =
-            "<dt>status</dt><dd>datasheet.json not built yet</dd>";
+          return `<tr><td>${doc.provider}</td><td>${s.models}</td>` +
+            `<td>${s.matched_cores}</td><td>${s.unmatched_cores}</td>` +
+            `<td>${s.with_prices}</td><td>${doc.units ?? "USD"}</td></tr>`;
         });
+        document.querySelector("#stats tbody").innerHTML = rows.length
+          ? rows.join("")
+          : `<tr><td colspan="6">no provider overlays built yet</td></tr>`;
+      });
     </script>
   </body>
 </html>

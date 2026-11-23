@@ -10,7 +10,7 @@ on:
       - "deno.json"
       - ".github/workflows/publish.yml"
   schedule:
-    # Bifrost and Pollinations both churn daily; refresh the published sheet.
+    # Bifrost and every provider catalog churn daily; refresh the published sheet.
     - cron: "17 5 * * *"
   workflow_dispatch:
 
@@ -40,37 +40,37 @@ jobs:
         run: deno test -A test/
 
       - name: Build datasheet
-        # The Pollinations listing is public, so POLLI_API_KEY is optional and not set.
-        run: |
-          deno task datasheet \
-            --merged-out site/datasheet.json \
-            --out site/pollinations.json \
-            --quiet
+        # Providers with an authenticated listing (sail) are skipped with a
+        # warning when their secret is absent, so the sheet still publishes.
+        env:
+          SAIL_API_KEY: ${{ secrets.SAIL_API_KEY }}
+        run: deno task datasheet --out-dir site --quiet
 
       - name: Job summary
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json
-          ov = json.load(open("site/pollinations.json"))
+          import glob, json, os
           merged = json.load(open("site/datasheet.json"))
-          s = ov["stats"]
+          overlays = [json.load(open(p)) for p in sorted(glob.glob("site/*.json"))
+                      if os.path.basename(p) != "datasheet.json"]
           print("### datasheet built\n")
-          print(f"- generated_at: `{ov['generated_at']}`")
-          print(f"- merged datasheet: {len(merged)} entries "
-                f"({len(merged) - s['emitted']} stock + {s['emitted']} pollinations)")
-          print(f"- pollinations models: {s['pollinations_entries']}, "
-                f"{s['matched_cores']} extend a known core, {s['unmatched_cores']} standalone")
-          print(f"- with cost fields: {s['with_prices']} · units: {ov['units']}")
-          print(f"- joined by name/basename/alias: "
-                f"{s['joined_by']['name']}/{s['joined_by']['basename']}/{s['joined_by']['alias']}")
-          print(f"- by category: {', '.join(f'{k} {v}' for k, v in sorted(s['by_category'].items()))}")
+          print(f"- merged datasheet: **{len(merged)}** entries "
+                f"({len(merged) - sum(o['stats']['emitted'] for o in overlays)} stock)")
+          print("\n| provider | models | extend a core | standalone | extends stock | unchanged | priced | units |")
+          print("|---|---|---|---|---|---|---|---|")
+          for o in overlays:
+              s = o["stats"]
+              print(f"| {o['provider']} | {s['models']} | {s['matched_cores']} | "
+                    f"{s['unmatched_cores']} | {s.get('extends_stock', 0)} | {s.get('unchanged', 0)} | "
+                    f"{s['with_prices']} | {o.get('units', 'USD')} |")
           print("\n| source | status | bytes | entries |")
           print("|---|---|---|---|")
-          for src in ov.get("sources", []):
-              print(f"| {src['url']} | {src['status']} | {src['bytes']} | {src['entries']} |")
+          for o in overlays:
+              for src in o.get("sources", []):
+                  print(f"| {src['url']} | {src['status']} | {src['bytes']} | {src['entries']} |")
           PY
-          du -h site/datasheet.json site/pollinations.json
+          du -h site/*.json
 
       - uses: actions/upload-pages-artifact@v5
         with:

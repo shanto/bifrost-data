@@ -1,20 +1,20 @@
 # bifrost-data
 
-Pollinations model data infused into the stock [Bifrost](https://getbifrost.ai/datasheet) model
-datasheet. A Deno engine turns the Pollinations model list into **stock Bifrost datasheet entries**
-and publishes them from a GitHub Action.
+Third-party model catalogs turned into stock [Bifrost](https://getbifrost.ai/datasheet) datasheet
+entries and published from a GitHub Action. Two providers today: **Pollinations** and **Sail**.
 
-- `https://shanto.github.io/bifrost-data/datasheet.json` — stock datasheet + the pollinations entries
-- `https://shanto.github.io/bifrost-data/pollinations.json` — only the pollinations entries
-- Upstream: `https://getbifrost.ai/datasheet` · `https://gen.pollinations.ai/models`
+- `https://shanto.github.io/bifrost-data/datasheet.json` — stock datasheet + every provider's entries
+- `…/pollinations.json`, `…/sail.json` — per-provider overlays
+- Upstreams: `https://getbifrost.ai/datasheet` · `https://gen.pollinations.ai/models` ·
+  `https://api.sailresearch.com/v1/models`
 
 ## Shape
 
-Entries are keyed `provider/author/model` and use the same field names as the stock datasheet, the
-same way `openrouter/openai/gpt-6.2-astra` extends `openai/gpt-6.2-astra`:
+Entries are keyed `provider/author/model` and use the stock field vocabulary, the same way
+`openrouter/openai/gpt-6.2-astra` extends `openai/gpt-6.2-astra`:
 
 ```jsonc
-"pollinations/openai/gpt-6.2-astra": {
+"pollinations/openai/gpt-6.2-astra": {          // pollen priced, treated as USD 1:1
   "provider": "pollinations",
   "base_model": "gpt-6.2-astra",
   "source": "https://gen.pollinations.ai/models",
@@ -22,68 +22,83 @@ same way `openrouter/openai/gpt-6.2-astra` extends `openai/gpt-6.2-astra`:
   "input_cost_per_token": 6e-06,
   "output_cost_per_token": 3e-05,
   "cache_read_input_token_cost": 3e-07,
-  "cache_creation_input_token_cost": 7.5e-06,
   "max_input_tokens": 1050000,
-  "supported_endpoints": ["/v1/chat/completions", "/text", "/text/{prompt}", "/v1/responses", "/v1/messages"],
+  "supported_endpoints": ["/v1/chat/completions", "/text", "…"],
   "supported_modalities": ["text", "image"],
-  "supported_output_modalities": ["text"],
   "supports_function_calling": true,
-  "supports_reasoning": true,
+  "provider_specific_entry": { "title": "GPT-6.2 Astra", "paid_only": true }
+}
+
+"sail/moonshotai/Kimi-K3.1-Pro": {              // already USD, per-million divided out
+  "provider": "sail",
+  "base_model": "Kimi-K3.1-Pro",
+  "source": "https://api.sailresearch.com/v1/models",
+  "mode": "chat",
+  "input_cost_per_token": 1.5e-06,              // "asap" tier — the plain fields
+  "output_cost_per_token": 1e-05,
+  "input_cost_per_token_balanced": 1.2e-06,     // "balanced" tier
+  "output_cost_per_token_balanced": 8e-06,
+  "input_cost_per_token_flex": 7e-07,           // "flex" tier
+  "output_cost_per_token_flex": 6e-06,
+  "supported_modalities": ["text", "image"],
   "supports_vision": true,
-  "provider_specific_entry": {
-    "title": "GPT-6.2 Astra",
-    "paid_only": true,
-    "pricing_variants": [{ "name": "long_context", "pricing": { "currency": "pollen", "promptTextTokens": "0.000012", "…": "…" } }]
-  }
+  "provider_specific_entry": { "pricing_tiers": ["asap", "balanced", "flex"], "owned_by": "moonshotai" }
 }
 ```
 
-Every top-level field in a pollinations entry exists in the stock datasheet vocabulary — the build
-asserts that; nothing is invented. Anything Pollinations publishes that Bifrost has no field for
-(its raw per-unit pollen rates, price variants, title, `per_user_rpm`, community/paid flags) goes
-into `provider_specific_entry`, which is the stock slot for provider-only data.
+Every top-level field in an entry exists in the stock datasheet vocabulary — the build throws on
+anything else. Provider-only data (raw rates, price variants, titles, tier names, community flags)
+goes into `provider_specific_entry`, the stock slot for it.
 
-The base model keeps its own prices untouched. A consumer groups by `base_model`:
+Consumers group by `base_model`:
 
 ```ts
 import { baseOf } from "https://raw.githubusercontent.com/shanto/bifrost-data/master/src/merge.ts";
-baseOf(datasheet, "pollinations/openai/gpt-6.2-astra");
-// → { "openai/gpt-6.2-astra": …, "azure/gpt-6.2-astra": …, "openrouter/openai/gpt-6.2-astra": …, … }
+baseOf(datasheet, "sail/deepseek-ai/DeepSeek-V4-Pro-0813");
+// → every entry for that model, stock ones included
 ```
 
-`pollinations.json` wraps the same entries in a small document:
+## Layout
 
-```jsonc
-{
-  "schema": "bifrost-data/pollinations@1",
-  "generated_at": "…",
-  "provider": "pollinations",
-  "units": "pollen treated as USD (1:1)",
-  "sources": [{ "url": "https://gen.pollinations.ai/models", "status": 200, "bytes": 468512, "entries": 487, "ms": 729 }],
-  "stats": { "pollinations_entries": 488, "emitted": 488, "matched_cores": 352, "unmatched_cores": 136,
-             "with_prices": 457, "joined_by": { "name": 14, "basename": 329, "alias": 9 } },
-  "models": { "pollinations/openai/gpt-6.2-astra": { … } }
-}
 ```
+src/merge.ts                   provider-agnostic: core join, entry building, overlay + merge
+src/providers/types.ts         NormalizedModel + Provider contract
+src/providers/common.ts        category→mode, rate scaling
+src/providers/pollinations.ts
+src/providers/sail.ts
+src/cli.ts                     build / --resolve / HTTP server / alignment guard
+src/sources.ts                 fetch + truncation-aware parse errors
+test/merge_test.ts             15 tests: core rules, both adapters, no network
+```
+
+A provider answers only four things — `id`, `sourceUrl`, `urls()`, `headers(env)` and
+`parse(payload) → NormalizedModel[]`. Keys, `base_model` joins, cost fields and the stock-vocabulary
+guard are shared, so a third catalog is one adapter file plus a line in `allProviders()`.
 
 ## Join rules
 
 `base_model` comes from the stock datasheet, in this order:
 
-1. **name** — the core name equals the Pollinations name.
-2. **basename** — the core equals the model name with the `publisher/` prefix stripped.
-3. Pollinations' own `base_model`, by the same two rules (community models delegate to a core).
-4. **alias** — a normalised name or one of Pollinations' own aliases matches exactly one core
-   (`claude-opus-4-5` ≡ `claude-opus-4.5`). This is upstream's claim, not ours: Pollinations lists
-   `claude-opus-4.5` as an alias of `anthropic/claude-opus-4.6`, so the entry lands on that core and
-   is flagged `provider_specific_entry.joined_by_alias`.
+0. **stock key** — if Bifrost already publishes `<provider>/<model>`, that entry is the authority:
+   its `base_model`, limits and capability flags are kept and only prices/sizes are overridden. If
+   nothing differs, the model is not repeated in the overlay at all (`note` and `stats.unchanged`
+   say how many).
+1. **name** — the core name equals the provider's model id.
+2. **basename** — the core equals the model id with the `publisher/` prefix stripped.
+3. the provider's own declared parent (Pollinations' `base_model` field).
+4. **alias** — a normalised name or a provider alias matches exactly one core
+   (`claude-opus-4-5` ≡ `claude-opus-4.5`). This is upstream's claim, not ours, and the entry is
+   flagged `provider_specific_entry.joined_by_alias`.
 
-An alias matching several cores is refused rather than guessed; `--strict` skips step 4 entirely.
+An alias matching several cores is refused rather than guessed; `--strict` skips step 4.
 
 ## Prices
 
-**Pollen is treated as USD 1:1.** Each Pollinations rate maps onto the Bifrost field that means the
-same thing:
+Every adapter converts to **USD per unit** before the entry is built, so the datasheet never mixes
+currencies.
+
+**Pollinations** quotes pollen; pollen is treated as USD 1:1 (`--pollen-per-usd <n>` to override,
+`--no-prices` to drop cost fields). Rates map onto the Bifrost field with the same meaning:
 
 | Pollinations | Bifrost |
 |---|---|
@@ -96,52 +111,57 @@ same thing:
 | `promptVideoSeconds` / `completionVideoSeconds` | `input_cost_per_video_per_second` / `output_cost_per_video_second` |
 | `completionReasoningTokens` | `output_cost_per_reasoning_token` |
 
-Rates with no Bifrost equivalent stay raw under `provider_specific_entry.pollen_pricing`. Models
-Pollinations publishes no rates for (31 of 488 today — mostly free community models) simply carry
-no cost fields.
+Anything without an equivalent stays raw under `provider_specific_entry.pollen_pricing`; models the
+provider publishes no rates for simply carry no cost fields.
 
-Sanity check on 1:1: Pollinations quotes `gpt-6.2-astra` at 6e-06/3e-05 while OpenAI's own entries
-say 8e-06/4e-05 — same order, plausible discount, not a unit mismatch.
+**Sail** quotes USD per **million** tokens, so each rate is divided by 1e6. Its three service tiers
+land on the per-mode fields Bifrost already uses for the same idea:
 
-```bash
-deno task datasheet --pollen-per-usd 1000   # if 1:1 ever stops holding
-deno task datasheet --no-prices             # no cost fields at all
-```
+| Sail tier | Bifrost field |
+|---|---|
+| `asap` | `input_cost_per_token`, `output_cost_per_token`, `cache_read_input_token_cost` |
+| `balanced` | the same three with a `_balanced` suffix |
+| `flex` | the same three with a `_flex` suffix |
+
+Bifrost already ships `sail/*` entries sourced from Sail's docs, and this is the convention it uses
+there — the API's numbers match them exactly today, so normally only new models reach the overlay.
 
 ## Usage
 
 ```bash
-deno task datasheet                                  # writes both files into dist/
-deno task datasheet --stdout | jq '.stats'           # overlay document to stdout
-deno task datasheet --resolve pollinations/openai/gpt-6.2-astra
-deno task serve --port 8080 --ttl 60                 # GET /datasheet.json, /pollinations.json
-deno task test                                       # merge-rule tests, no network
+deno task datasheet                                   # every provider, into dist/
+deno task datasheet --provider sail --stdout | jq .stats
+deno task datasheet --env-file ../Bifrost/.env        # SAIL_API_KEY from a file
+deno task datasheet --resolve sail/deepseek-ai/DeepSeek-V4-Pro-0813
+deno task serve --port 8080 --ttl 60                  # /datasheet.json + /<provider>.json
+deno task test
 ```
 
-Flags: `-o/--out` (overlay path, default `dist/pollinations.json`), `--merged-out` (default
-`dist/datasheet.json`), `--stdout`, `--resolve <key>`, `--serve`, `--port`, `--ttl` (0 = rebuild
-every request), `--key` (or `POLLI_API_KEY`), `--pollen-per-usd` (default `1`), `--no-prices`,
-`--strict`, `--quiet`.
+Flags: `--provider <id>`, `--out-dir` (default `dist`), `--merged-out`, `--stdout`,
+`--resolve <key>`, `--env-file`, `--serve`, `--port`, `--ttl` (0 = rebuild per request),
+`--pollen-per-usd` (default `1`), `--no-prices`, `--strict`, `--quiet`.
 
-The Pollinations key is optional: `/models` is public and a keyed request returns byte-identical
-bytes. The flag exists only so a private deployment can pass one through.
+Keys come from the environment or `--env-file`: `SAIL_API_KEY` (required for Sail) and an optional
+`POLLI_API_KEY`. Pollinations' listing is public — a keyed request returns byte-identical bytes — so
+a missing Sail key only skips that provider, with a warning.
 
 ## Publishing
 
 `.github/workflows/publish.yml` runs on push to `master`, daily at 05:17 UTC, and on manual
-dispatch. It typechecks, runs the tests, builds both files into `site/`, and deploys with
-`actions/deploy-pages` — Pages uses **GitHub Actions** as its source, so there is no `gh-pages`
-branch and nothing is committed.
+dispatch: typecheck → tests → build every provider into `site/` → `actions/deploy-pages`. Pages uses
+GitHub Actions as its source, so there is no `gh-pages` branch and nothing is committed.
 
-The daily cron is deliberate: both upstreams churn constantly, and every build carries
-`generated_at` plus per-source byte counts so two builds can be diffed.
+**One-time setup:** add `SAIL_API_KEY` as an Actions secret (Settings → Secrets and variables →
+Actions). Without it the build skips Sail and publishes the rest.
 
 ## Notes on sources
 
 - `getbifrost.ai/datasheet/model-parameters` (27 MB) is **not** fetched. It only carries parameter
-  schemas, and parsing it is what pushes peak memory to ~143 MB. Dropping it keeps a build near
+  schemas, and parsing it is what pushed peak memory to ~143 MB. Dropping it keeps a build near
   ~15 MB and ~2–3 s.
 - `gen.pollinations.ai/image/models` is a filtered view of `/models` (98 image + 30 video), not an
   extra catalog. It is merged anyway so a future divergence can't be lost.
 - `health` counters are never emitted: they change on every request and would make every build
   look different.
+- Sail publishes no context length, so its entries carry no `max_input_tokens` — read that off the
+  core the entry extends (`baseOf`).

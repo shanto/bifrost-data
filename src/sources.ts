@@ -1,12 +1,9 @@
 /**
- * Source fetching. Every source is public; the Pollinations key is accepted but
- * does not change the listing payload (verified: identical bytes with/without),
- * so it is optional and never required to build the datasheet.
+ * Source fetching. Providers own their own URLs and auth headers; this module
+ * only knows how to pull JSON and report what it got.
  */
 
 export const BIFROST_DATASHEET_URL = "https://getbifrost.ai/datasheet";
-export const POLLINATIONS_MODELS_URL = "https://gen.pollinations.ai/models";
-export const POLLINATIONS_IMAGE_MODELS_URL = "https://gen.pollinations.ai/image/models";
 
 export interface SourceMeta {
   url: string;
@@ -25,14 +22,14 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 export async function fetchJson<T>(
   url: string,
-  opts: { key?: string; timeoutMs?: number } = {},
+  opts: { headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<Fetched<T>> {
-  const target = new URL(url);
-  if (opts.key) target.searchParams.set("key", opts.key);
-
   const started = performance.now();
   const signal = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const res = await fetch(target, { signal, headers: { accept: "application/json" } });
+  const res = await fetch(url, {
+    signal,
+    headers: { accept: "application/json", ...(opts.headers ?? {}) },
+  });
   const body = await res.text();
 
   if (!res.ok) {
@@ -50,16 +47,16 @@ export async function fetchJson<T>(
     );
   }
 
-  const meta: SourceMeta = {
-    url,
-    status: res.status,
-    bytes: body.length,
-    entries: Array.isArray(data)
-      ? data.length
-      : typeof data === "object" && data !== null
-      ? Object.keys(data as Record<string, unknown>).length
-      : 0,
-    ms: Math.round(performance.now() - started),
+  const entries = Array.isArray(data)
+    ? data.length
+    : Array.isArray((data as { data?: unknown[] })?.data)
+    ? ((data as { data: unknown[] }).data).length
+    : typeof data === "object" && data !== null
+    ? Object.keys(data as Record<string, unknown>).length
+    : 0;
+
+  return {
+    data,
+    meta: { url, status: res.status, bytes: body.length, entries, ms: Math.round(performance.now() - started) },
   };
-  return { data, meta };
 }

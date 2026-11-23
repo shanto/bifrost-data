@@ -1,95 +1,31 @@
 /**
- * Pollinations model data, emitted as stock Bifrost datasheet entries.
+ * Provider-agnostic merge: turn normalized provider models into stock Bifrost
+ * datasheet entries.
  *
  * Shape rule — the output is the Bifrost datasheet format, nothing else. An
  * entry is keyed `<provider>/<author>/<model>` and carries `provider`,
  * `base_model`, `mode`, costs, limits and capability flags exactly like the
  * `openrouter/...` entries in the stock datasheet:
  *
- *   "openrouter/openai/gpt-6.2-astra"   extends  "openai/gpt-6.2-astra"
- *   "pollinations/openai/gpt-6.2-astra" extends  "openai/gpt-6.2-astra"   ← ours
+ *   "openrouter/openai/gpt-6.2-astra"     extends  "openai/gpt-6.2-astra"
+ *   "pollinations/openai/gpt-6.2-astra"   extends  "openai/gpt-6.2-astra"
+ *   "sail/deepseek-ai/DeepSeek-V4-Pro"    extends  "DeepSeek-V4-Pro"
  *
- * No per-model wrapper document, no nested provenance block. Anything
- * Pollinations publishes that Bifrost has no field for goes into
- * `provider_specific_entry`, which is the stock place for provider-only data.
+ * No vendor-specific knowledge lives here — that belongs to the provider
+ * adapter in src/providers/.
  */
+
+import type { NormalizedModel, Provider } from "./providers/types.ts";
 
 export interface BifrostEntry {
   provider?: string;
   base_model?: string;
   mode?: string;
   source?: string;
-  input_cost_per_token?: number;
-  output_cost_per_token?: number;
-  cache_read_input_token_cost?: number;
-  cache_creation_input_token_cost?: number;
-  input_cost_per_audio_token?: number;
-  output_cost_per_audio_token?: number;
-  input_cost_per_image_token?: number;
-  max_input_tokens?: number;
-  max_output_tokens?: number;
-  max_tokens?: number;
-  supported_endpoints?: string[];
-  supported_modalities?: string[];
-  supported_output_modalities?: string[];
-  supports_function_calling?: boolean;
-  supports_reasoning?: boolean;
-  supports_vision?: boolean;
-  supports_audio_input?: boolean;
-  supports_audio_output?: boolean;
-  supports_web_search?: boolean;
-  provider_specific_entry?: Record<string, unknown>;
   [field: string]: unknown;
 }
 
 export type Datasheet = Record<string, BifrostEntry>;
-
-export interface PollModel {
-  name: string;
-  aliases?: string[];
-  category?: string;
-  publisher?: string;
-  base_model?: string;
-  title?: string;
-  description?: string;
-  community?: boolean;
-  paid_only?: boolean;
-  context_length?: number;
-  max_completion_tokens?: number;
-  input_modalities?: string[];
-  output_modalities?: string[];
-  supported_endpoints?: string[];
-  capabilities?: string[];
-  tools?: boolean;
-  reasoning?: boolean;
-  per_user_rpm?: number;
-  pricing?: Record<string, string>;
-  pricing_variants?: unknown[];
-  [field: string]: unknown;
-}
-
-export const PROVIDER = "pollinations";
-export const SOURCE = "https://gen.pollinations.ai/models";
-
-export interface MergeStats {
-  pollinations_entries: number;
-  emitted: number;
-  matched_cores: number;
-  unmatched_cores: number;
-  with_prices: number;
-  by_category: Record<string, number>;
-  joined_by: { name: number; basename: number; alias: number };
-}
-
-export interface MergeOptions {
-  /** Pollen units per 1 USD. Default 1 — pollen treated as USD. 0 disables cost fields. */
-  pollenPerUsd?: number;
-  /** Only join on model names; ignore aliases (aliases are upstream's claim, not ours). */
-  strict?: boolean;
-}
-
-const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-const basename = (n: string): string => n.split("/").pop() ?? n;
 
 export interface CoreIndex {
   /** Bare model name (as it appears in `base_model`) → a stock entry using it. */
@@ -100,13 +36,34 @@ export interface CoreIndex {
   names: Set<string>;
 }
 
+const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+export const basename = (n: string): string => n.split("/").pop() ?? n;
+
+/** Structural equality, good enough for the JSON scalars and arrays we emit. */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => deepEqual(item, b[i]));
+  }
+  if (typeof a === "object") {
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const ak = Object.keys(ao);
+    if (ak.length !== Object.keys(bo).length) return false;
+    return ak.every((k) => deepEqual(ao[k], bo[k]));
+  }
+  return false;
+}
+
 export function indexCores(bifrost: Datasheet): CoreIndex {
   const bare = new Map<string, BifrostEntry>();
   const tokens = new Map<string, string[]>();
   const names = new Set<string>();
   for (const entry of Object.values(bifrost)) {
     const core = entry.base_model;
-    if (!core) continue;
+    if (typeof core !== "string" || !core) continue;
     names.add(core);
     if (!bare.has(core)) bare.set(core, entry);
     const key = norm(core);
@@ -117,33 +74,34 @@ export function indexCores(bifrost: Datasheet): CoreIndex {
   return { bare, tokens, names };
 }
 
+export type JoinVia = "stock" | "name" | "basename" | "alias";
+
 /**
- * The core a Pollinations model extends: exact core name, then the bare model
- * name, then its own `base_model`, then a normalised alias — and an alias only
- * counts when exactly one core matches, so "claude" can never retarget every
- * Claude variant.
+ * The core a provider model extends: exact core name, then the bare model name,
+ * then the provider's own declared parent, then a normalised alias — and an
+ * alias only counts when exactly one core matches, so "claude" can never
+ * retarget every Claude variant.
  */
 export function coreFor(
-  model: PollModel,
+  model: NormalizedModel,
   cores: CoreIndex,
   opts: { strict?: boolean } = {},
-): { core: string; via: "name" | "basename" | "alias" | null } {
+): { core: string; via: JoinVia | null } {
   const own = basename(model.name);
-  const parent = model.base_model ? basename(model.base_model) : "";
+  const parent = model.parent ? basename(model.parent) : "";
 
   if (cores.names.has(model.name)) return { core: model.name, via: "name" };
   if (cores.names.has(own)) return { core: own, via: "basename" };
-  if (model.base_model && cores.names.has(model.base_model)) {
-    return { core: model.base_model, via: "name" };
+  if (model.parent && cores.names.has(model.parent)) {
+    return { core: model.parent, via: "name" };
   }
   if (parent && cores.names.has(parent)) return { core: parent, via: "basename" };
 
   if (opts.strict) return { core: own, via: null };
 
-  // Upstream's own aliases are the only sanctioned way to cross a naming
+  // A provider's own aliases are the only sanctioned way to cross a naming
   // difference (4.6's alias list claims 4.5), so they are candidates too.
-  const candidates = [own, parent, ...(model.aliases ?? [])];
-  for (const candidate of candidates) {
+  for (const candidate of [own, parent, ...(model.aliases ?? [])]) {
     if (!candidate) continue;
     const matches = cores.tokens.get(norm(candidate)) ?? [];
     if (matches.length === 1) return { core: matches[0], via: "alias" };
@@ -151,182 +109,177 @@ export function coreFor(
   return { core: own, via: null };
 }
 
-/** Pollen rate → USD per unit (1:1 by default), or undefined when costs are off. */
-function usd(pollen: string | undefined, perUsd: number): number | undefined {
-  if (perUsd <= 0) return undefined;
-  const value = Number(pollen);
-  return Number.isFinite(value) && value > 0 ? value / perUsd : undefined;
+export interface BuildOptions {
+  /** Only join on model names; ignore aliases. */
+  strict?: boolean;
 }
 
-const MODES: Record<string, string> = {
-  text: "chat",
-  image: "image_generation",
-  video: "video_generation",
-  embedding: "embedding",
-  realtime: "realtime",
-  decision: "decisions",
-  "3d": "3d",
-};
-
-function modeFor(model: PollModel): string | undefined {
-  if (model.category === "audio") {
-    return (model.supported_endpoints ?? []).includes("/v1/audio/transcriptions")
-      ? "audio_transcription"
-      : "audio_speech";
-  }
-  return model.category ? MODES[model.category] : undefined;
-}
-
-/** Pollen rates that carry the same meaning as the Bifrost cost field. */
-const COST_FIELDS: [string, string][] = [
-  ["promptTextTokens", "input_cost_per_token"],
-  ["completionTextTokens", "output_cost_per_token"],
-  ["promptCachedTokens", "cache_read_input_token_cost"],
-  ["promptCacheWriteTokens", "cache_creation_input_token_cost"],
-  ["promptAudioTokens", "input_cost_per_audio_token"],
-  ["completionAudioTokens", "output_cost_per_audio_token"],
-  ["promptAudioSeconds", "input_cost_per_audio_per_second"],
-  ["promptImageTokens", "input_cost_per_image_token"],
-  ["completionImageTokens", "output_cost_per_image_token"],
-  ["promptVideoTokens", "input_cost_per_video_token"],
-  ["completionVideoTokens", "output_cost_per_video_token"],
-  ["promptVideoSeconds", "input_cost_per_video_per_second"],
-  ["completionVideoSeconds", "output_cost_per_video_per_second"],
-  ["completionReasoningTokens", "output_cost_per_reasoning_token"],
-];
-
-/** Rates with no Bifrost equivalent stay raw in `provider_specific_entry`. */
-const MAPPED_RATES = new Set(COST_FIELDS.map(([pollenKey]) => pollenKey).concat("currency"));
-
-export function buildEntry(
-  model: PollModel,
-  core: string,
-  via: "name" | "basename" | "alias" | null,
-  opts: MergeOptions = {},
-): BifrostEntry {
-  const perUsd = opts.pollenPerUsd ?? 1;
-  const pricing = model.pricing ?? {};
-
-  const entry: BifrostEntry = {
-    provider: PROVIDER,
-    base_model: core,
-    source: SOURCE,
-  };
-  const mode = modeFor(model);
-  if (mode) entry.mode = mode;
-
-  for (const [pollenKey, field] of COST_FIELDS) {
-    const value = usd(pricing[pollenKey], perUsd);
-    if (value !== undefined) entry[field] = value;
-  }
-
-  if (typeof model.context_length === "number") entry.max_input_tokens = model.context_length;
-  if (typeof model.max_completion_tokens === "number") {
-    entry.max_output_tokens = model.max_completion_tokens;
-    entry.max_tokens = model.max_completion_tokens;
-  }
-
-  if (model.supported_endpoints?.length) entry.supported_endpoints = model.supported_endpoints;
-  if (model.input_modalities?.length) entry.supported_modalities = model.input_modalities;
-  if (model.output_modalities?.length) entry.supported_output_modalities = model.output_modalities;
-
-  const capabilities = model.capabilities ?? [];
-  if (model.tools === true || capabilities.includes("tool_calling")) {
-    entry.supports_function_calling = true;
-  }
-  if (model.reasoning === true || capabilities.includes("reasoning")) {
-    entry.supports_reasoning = true;
-  }
-  if (capabilities.includes("web_search")) entry.supports_web_search = true;
-
-  const inputs = model.input_modalities ?? [];
-  const outputs = model.output_modalities ?? [];
-  if (inputs.includes("image")) entry.supports_vision = true;
-  if (inputs.includes("audio")) entry.supports_audio_input = true;
-  if (outputs.includes("audio")) entry.supports_audio_output = true;
-
-  const specific: Record<string, unknown> = {};
-  if (model.title) specific.title = model.title;
-  if (model.community) specific.community = true;
-  if (model.paid_only) specific.paid_only = true;
-  if (via === "alias") specific.joined_by_alias = true;
-  if (typeof model.per_user_rpm === "number") specific.per_user_rpm = model.per_user_rpm;
-
-  const rawPricing = Object.fromEntries(
-    Object.entries(pricing).filter(([key]) => !MAPPED_RATES.has(key) || key === "currency"),
-  );
-  if (Object.keys(rawPricing).length > 1) specific.pollen_pricing = rawPricing;
-  if (model.pricing_variants?.length) specific.pricing_variants = model.pricing_variants;
-  if (Object.keys(specific).length) entry.provider_specific_entry = specific;
-
-  return entry;
+export interface MergeStats {
+  models: number;
+  emitted: number;
+  matched_cores: number;
+  unmatched_cores: number;
+  with_prices: number;
+  /** Provider entries Bifrost already publishes and we now extend in place. */
+  extends_stock: number;
+  /** Extends_stock entries where nothing differed, so nothing was written. */
+  unchanged: number;
+  by_mode: Record<string, number>;
+  joined_by: { stock: number; name: number; basename: number; alias: number };
 }
 
 export interface OverlayDoc {
-  schema: "bifrost-data/pollinations@1";
+  schema: string;
   generated_at: string;
-  provider: typeof PROVIDER;
+  provider: string;
   source: string;
-  units: string;
+  units?: string;
+  note?: string;
   sources?: { url: string; status: number; bytes: number; entries: number; ms: number }[];
   stats: MergeStats;
   models: Datasheet;
 }
 
-/** The additive layer: only `pollinations/...` keys, in stock entry shape. */
+export function buildEntry(
+  model: NormalizedModel,
+  core: string,
+  via: JoinVia | null,
+  provider: Provider,
+  stock?: BifrostEntry,
+): BifrostEntry {
+  // Extending an entry Bifrost already publishes for this same provider: keep
+  // everything it says (limits, capability flags, its own base_model) and let
+  // the provider override only prices and sizes — the diff stays a diff.
+  if (stock) {
+    const next: BifrostEntry = { ...stock, provider: provider.id };
+    for (const [field, value] of Object.entries(model.costs ?? {})) next[field] = value;
+    if (typeof model.contextLength === "number") next.max_input_tokens = model.contextLength;
+    if (typeof model.maxOutputTokens === "number") {
+      next.max_output_tokens = model.maxOutputTokens;
+      next.max_tokens = model.maxOutputTokens;
+    }
+    if (!next.mode && model.mode) next.mode = model.mode;
+
+    const changed: BifrostEntry = { provider: provider.id, base_model: next.base_model ?? core };
+    for (const [field, value] of Object.entries(next)) {
+      if (field === "provider" || field === "base_model") continue;
+      if (!deepEqual(stock[field], value)) changed[field] = value;
+    }
+    return changed;
+  }
+
+  const entry: BifrostEntry = {
+    provider: provider.id,
+    base_model: core,
+    source: provider.sourceUrl,
+  };
+  if (model.mode) entry.mode = model.mode;
+
+  for (const [field, value] of Object.entries(model.costs ?? {})) entry[field] = value;
+
+  if (typeof model.contextLength === "number") entry.max_input_tokens = model.contextLength;
+  if (typeof model.maxOutputTokens === "number") {
+    entry.max_output_tokens = model.maxOutputTokens;
+    entry.max_tokens = model.maxOutputTokens;
+  }
+
+  if (model.endpoints?.length) entry.supported_endpoints = model.endpoints;
+  if (model.modalities?.length) entry.supported_modalities = model.modalities;
+  if (model.outputModalities?.length) entry.supported_output_modalities = model.outputModalities;
+
+  if (model.functionCalling) entry.supports_function_calling = true;
+  if (model.reasoning) entry.supports_reasoning = true;
+  if (model.webSearch) entry.supports_web_search = true;
+  if (model.modalities?.includes("image")) entry.supports_vision = true;
+  if (model.modalities?.includes("audio")) entry.supports_audio_input = true;
+  if (model.outputModalities?.includes("audio")) entry.supports_audio_output = true;
+
+  const specific: Record<string, unknown> = { ...(model.specific ?? {}) };
+  if (via === "alias") specific.joined_by_alias = true;
+  if (Object.keys(specific).length) entry.provider_specific_entry = specific;
+
+  return entry;
+}
+
+/** The additive layer for one provider: only `<provider>/...` keys, stock entry shape. */
 export function buildOverlay(
   bifrost: Datasheet,
-  poll: PollModel[],
-  opts: MergeOptions = {},
+  provider: Provider,
+  models: NormalizedModel[],
+  opts: BuildOptions = {},
 ): OverlayDoc {
   const cores = indexCores(bifrost);
-  const models: Datasheet = {};
+  const entries: Datasheet = {};
   const stats: MergeStats = {
-    pollinations_entries: poll.length,
+    models: models.length,
     emitted: 0,
     matched_cores: 0,
     unmatched_cores: 0,
     with_prices: 0,
-    by_category: {},
-    joined_by: { name: 0, basename: 0, alias: 0 },
+    extends_stock: 0,
+    unchanged: 0,
+    by_mode: {},
+    joined_by: { stock: 0, name: 0, basename: 0, alias: 0 },
   };
 
-  for (const model of poll) {
-    const key = `${PROVIDER}/${model.name}`;
-    if (models[key]) continue;
+  for (const model of models) {
+    const key = `${provider.id}/${model.name}`;
+    if (entries[key]) continue;
 
-    const { core, via } = coreFor(model, cores, opts);
-    const entry = buildEntry(model, core, via, opts);
-    models[key] = entry;
-
-    stats.emitted++;
+    // Bifrost may already publish this exact provider/model key. Then the stock
+    // entry is the authority on everything but prices and sizes: no second
+    // guess at base_model, no dropped capability flags.
+    const stock = bifrost[key];
+    const resolved = stock?.base_model
+      ? { core: String(stock.base_model), via: "stock" as JoinVia }
+      : coreFor(model, cores, opts);
+    const { core, via } = resolved;
+    const entry = buildEntry(model, core, via, provider, stock);
+    if (stock) stats.extends_stock++;
     if (cores.bare.has(core)) stats.matched_cores++;
     else stats.unmatched_cores++;
     if (via) stats.joined_by[via]++;
+    const mode = model.mode ?? "unknown";
+    stats.by_mode[mode] = (stats.by_mode[mode] ?? 0) + 1;
     if (Object.keys(entry).some((field) => field.includes("_cost_"))) stats.with_prices++;
-    const category = model.category ?? "unknown";
-    stats.by_category[category] = (stats.by_category[category] ?? 0) + 1;
+
+    // An entry that only restates identity adds nothing: the stock record is
+    // already in the merged sheet.
+    const diffFields = Object.keys(entry).filter((f) => f !== "provider" && f !== "base_model");
+    if (stock && diffFields.length === 0) {
+      stats.unchanged++;
+      continue;
+    }
+    entries[key] = entry;
+    stats.emitted++;
   }
 
-  const perUsd = opts.pollenPerUsd ?? 1;
   return {
-    schema: "bifrost-data/pollinations@1",
+    schema: `bifrost-data/${provider.id}@1`,
     generated_at: new Date().toISOString(),
-    provider: PROVIDER,
-    source: SOURCE,
-    units: perUsd === 1
-      ? "pollen treated as USD (1:1)"
-      : perUsd > 0
-      ? `pollen / ${perUsd} per USD`
-      : "cost fields disabled",
+    provider: provider.id,
+    source: provider.sourceUrl,
+    ...(stats.unchanged > 0
+      ? {
+        note: `${stats.unchanged} ${provider.id} model(s) already match the stock datasheet ` +
+          `exactly and are not repeated here — read them from the datasheet itself.`,
+      }
+      : {}),
     stats,
-    models,
+    models: entries,
   };
 }
 
-/** Stock datasheet + the overlay entries. Drop-in for getbifrost.ai/datasheet. */
-export function mergedDatasheet(bifrost: Datasheet, overlay: OverlayDoc): Datasheet {
-  return { ...bifrost, ...overlay.models };
+/** Stock datasheet + every overlay. Drop-in for getbifrost.ai/datasheet. */
+export function mergedDatasheet(bifrost: Datasheet, overlays: OverlayDoc[]): Datasheet {
+  const merged: Datasheet = { ...bifrost };
+  for (const overlay of overlays) {
+    for (const [key, entry] of Object.entries(overlay.models)) {
+      // Overlay entries for an existing key are a diff — apply them on top.
+      merged[key] = merged[key] ? { ...merged[key], ...entry } : entry;
+    }
+  }
+  return merged;
 }
 
 /** Entries a given key inherits from, by shared base_model. */
@@ -340,4 +293,11 @@ export function baseOf(datasheet: Datasheet, key: string): Datasheet {
   return out;
 }
 
-export const _internal = { norm, basename, usd, modeFor };
+/** Every top-level field the stock datasheet already uses — the alignment guard. */
+export function stockFields(datasheet: Datasheet): Set<string> {
+  const fields = new Set<string>();
+  for (const entry of Object.values(datasheet)) {
+    for (const field of Object.keys(entry)) fields.add(field);
+  }
+  return fields;
+}
