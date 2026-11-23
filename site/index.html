@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bifrost-data</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1a1a1a;
+        --muted: #666;
+        --line: #ddd;
+        --bg: #fff;
+        --accent: #2563eb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8e8e8;
+          --muted: #9a9a9a;
+          --line: #333;
+          --bg: #111;
+          --accent: #7aa2ff;
+        }
+      }
+      body {
+        margin: 0 auto;
+        max-width: 44rem;
+        padding: 4rem 1.5rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin: 0 0 0.25rem;
+      }
+      p.sub {
+        color: var(--muted);
+        margin: 0 0 2rem;
+      }
+      a {
+        color: var(--accent);
+      }
+      code,
+      pre {
+        font: 13px/1.5 ui-monospace, SFMono-Regular, monospace;
+      }
+      pre {
+        background: color-mix(in srgb, var(--fg) 6%, transparent);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0.9rem;
+        overflow: auto;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 0.35rem 1.25rem;
+        margin: 2rem 0 0;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+        font-variant-numeric: tabular-nums;
+      }
+      hr {
+        border: 0;
+        border-top: 1px solid var(--line);
+        margin: 2rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>bifrost-data</h1>
+    <p class="sub">Pollinations model data infused into the stock Bifrost datasheet.</p>
+
+    <ul>
+      <li><a href="./datasheet.json">datasheet.json</a> — stock Bifrost datasheet + the pollinations entries</li>
+      <li><a href="./pollinations.json">pollinations.json</a> — only the pollinations entries</li>
+    </ul>
+
+    <pre><code>"pollinations/openai/gpt-6.2-astra": {
+  "provider": "pollinations",
+  "base_model": "gpt-6.2-astra",     <span class="note">← extends openai/gpt-6.2-astra</span>
+  "mode": "chat",
+  "input_cost_per_token": 6e-06,
+  "output_cost_per_token": 3e-05,
+  "max_input_tokens": 1050000,
+  …
+}</code></pre>
+
+    <p>
+      Entries are keyed <code>provider/author/model</code> exactly like the stock
+      <code>openrouter/…</code> entries: same field vocabulary, prices in USD per unit
+      (pollen treated 1:1), and <code>base_model</code> naming the core they extend.
+    </p>
+
+    <dl id="stats">
+      <dt>generated</dt>
+      <dd>…</dd>
+    </dl>
+
+    <hr />
+    <p class="sub">
+      Sources: getbifrost.ai/datasheet · gen.pollinations.ai/models. Rebuilt by GitHub Actions.
+    </p>
+
+    <script>
+      fetch("./pollinations.json")
+        .then((r) => r.json())
+        .then((doc) => {
+          const s = doc.stats;
+          const rows = [
+            ["generated", new Date(doc.generated_at).toISOString().replace("T", " ").slice(0, 19) + " UTC"],
+            ["units", doc.units],
+            ["pollinations models", s.pollinations_entries.toLocaleString()],
+            ["extend a known core", s.matched_cores.toLocaleString()],
+            ["standalone", s.unmatched_cores.toLocaleString()],
+            ["with cost fields", s.with_prices.toLocaleString()],
+            ["size", (JSON.stringify(doc).length / 1024).toFixed(1) + " KiB"],
+          ];
+          document.getElementById("stats").innerHTML = rows
+            .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)
+            .join("");
+        })
+        .catch(() => {
+          document.getElementById("stats").innerHTML =
+            "<dt>status</dt><dd>datasheet.json not built yet</dd>";
+        });
+    </script>
+  </body>
+</html>

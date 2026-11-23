@@ -1,0 +1,87 @@
+name: publish datasheet
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "test/**"
+      - "site/**"
+      - "deno.json"
+      - ".github/workflows/publish.yml"
+  schedule:
+    # Bifrost and Pollinations both churn daily; refresh the published sheet.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Typecheck
+        run: deno check src/cli.ts test/merge_test.ts
+
+      - name: Test merge rules
+        run: deno test -A test/
+
+      - name: Build datasheet
+        # The Pollinations listing is public, so POLLI_API_KEY is optional and not set.
+        run: |
+          deno task datasheet \
+            --merged-out site/datasheet.json \
+            --out site/pollinations.json \
+            --quiet
+
+      - name: Job summary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          ov = json.load(open("site/pollinations.json"))
+          merged = json.load(open("site/datasheet.json"))
+          s = ov["stats"]
+          print("### datasheet built\n")
+          print(f"- generated_at: `{ov['generated_at']}`")
+          print(f"- merged datasheet: {len(merged)} entries "
+                f"({len(merged) - s['emitted']} stock + {s['emitted']} pollinations)")
+          print(f"- pollinations models: {s['pollinations_entries']}, "
+                f"{s['matched_cores']} extend a known core, {s['unmatched_cores']} standalone")
+          print(f"- with cost fields: {s['with_prices']} · units: {ov['units']}")
+          print(f"- joined by name/basename/alias: "
+                f"{s['joined_by']['name']}/{s['joined_by']['basename']}/{s['joined_by']['alias']}")
+          print(f"- by category: {', '.join(f'{k} {v}' for k, v in sorted(s['by_category'].items()))}")
+          print("\n| source | status | bytes | entries |")
+          print("|---|---|---|---|")
+          for src in ov.get("sources", []):
+              print(f"| {src['url']} | {src['status']} | {src['bytes']} | {src['entries']} |")
+          PY
+          du -h site/datasheet.json site/pollinations.json
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
